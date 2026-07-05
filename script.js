@@ -1,4 +1,6 @@
 const STORAGE_KEY = "rp-character-archive-v1";
+const WORKSPACE_PATH_SEGMENT = "workspace";
+const WORKSPACE_KEY_PREFIX = `${STORAGE_KEY}-workspace-`;
 const FONT_DB_NAME = "rp-character-archive-font-db";
 const FONT_STORE_NAME = "fonts";
 const FONT_RECORD_KEY = "active";
@@ -107,6 +109,11 @@ const saveStatus = document.querySelector("#saveStatus");
 const settingsBtn = document.querySelector("#settingsBtn");
 const settingsPanel = document.querySelector("#settingsPanel");
 const paletteOptions = document.querySelectorAll(".palette-option");
+const workspacePanel = document.querySelector("#workspacePanel");
+const workspaceStatus = document.querySelector("#workspaceStatus");
+const workspaceCreateBtn = document.querySelector("#workspaceCreateBtn");
+const workspaceCopyBtn = document.querySelector("#workspaceCopyBtn");
+const workspaceBaseBtn = document.querySelector("#workspaceBaseBtn");
 const fontBtn = document.querySelector("#fontBtn");
 const fontResetBtn = document.querySelector("#fontResetBtn");
 const fontInput = document.querySelector("#fontInput");
@@ -128,9 +135,12 @@ const resetBtn = document.querySelector("#resetBtn");
 const embeddedExportState = readJsonScript(EXPORT_STATE_SCRIPT_ID);
 const lockedSiteConfig = readJsonScript(LOCKED_SITE_CONFIG_SCRIPT_ID) || {};
 const isStandaloneSite = Boolean(embeddedExportState);
+const activeWorkspaceId = isStandaloneSite ? "" : getWorkspaceIdFromLocation();
 const activeStorageKey =
   isStandaloneSite && typeof lockedSiteConfig.storageKey === "string" && lockedSiteConfig.storageKey
     ? lockedSiteConfig.storageKey
+    : activeWorkspaceId
+      ? `${WORKSPACE_KEY_PREFIX}${activeWorkspaceId}`
     : STORAGE_KEY;
 
 let state = loadState();
@@ -146,6 +156,7 @@ let isEditUnlocked = !isStandaloneSite;
 archiveTitle.textContent = state.title;
 applyTheme(state.theme);
 applyEditLockState();
+updateWorkspaceControls();
 renderTab(activeTab);
 applyStoredFont();
 
@@ -402,6 +413,29 @@ paletteOptions.forEach((button) => {
     applyTheme(button.dataset.theme);
     scheduleSave();
   });
+});
+
+workspaceCreateBtn?.addEventListener("click", () => {
+  persistNow();
+  const workspaceId = createWorkspaceSlug();
+  localStorage.setItem(`${WORKSPACE_KEY_PREFIX}${workspaceId}`, JSON.stringify(state));
+  window.location.href = buildWorkspaceUrl(workspaceId);
+});
+
+workspaceCopyBtn?.addEventListener("click", async () => {
+  const url = getShareableCurrentUrl();
+
+  try {
+    await copyTextToClipboard(url);
+    showNotice("현재 주소를 복사했습니다.");
+  } catch (error) {
+    window.prompt("주소를 직접 복사하세요.", url);
+  }
+});
+
+workspaceBaseBtn?.addEventListener("click", () => {
+  persistNow();
+  window.location.href = buildBaseUrl();
 });
 
 document.addEventListener("keydown", (event) => {
@@ -763,6 +797,8 @@ function applyEditLockState() {
     settingsPanel.hidden = true;
     settingsBtn.setAttribute("aria-expanded", "false");
   }
+
+  updateWorkspaceControls();
 }
 
 function buildStandaloneHtml({ standaloneState, lockConfig, cssText, scriptText, fontStyle }) {
@@ -1129,6 +1165,121 @@ function escapeStyleText(value) {
 
 function escapeScriptText(value) {
   return value.replace(/<\/script/gi, "<\\/script");
+}
+
+function getWorkspaceIdFromLocation() {
+  const queryWorkspace = sanitizeWorkspaceId(new URLSearchParams(window.location.search).get("workspace"));
+
+  if (queryWorkspace) {
+    return queryWorkspace;
+  }
+
+  const segments = window.location.pathname.split("/").filter(Boolean);
+  const workspaceIndex = segments.indexOf(WORKSPACE_PATH_SEGMENT);
+
+  if (workspaceIndex === -1) {
+    return "";
+  }
+
+  return sanitizeWorkspaceId(decodeURIComponent(segments[workspaceIndex + 1] || ""));
+}
+
+function sanitizeWorkspaceId(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "")
+    .slice(0, 48);
+}
+
+function createWorkspaceSlug() {
+  return `rp-${createExportId().replace(/[^a-z0-9]/gi, "").slice(0, 14).toLowerCase()}`;
+}
+
+function buildWorkspaceUrl(workspaceId) {
+  const url = new URL(window.location.href);
+  const safeWorkspaceId = sanitizeWorkspaceId(workspaceId) || createWorkspaceSlug();
+
+  url.hash = "";
+
+  if (url.protocol === "file:") {
+    url.searchParams.set("workspace", safeWorkspaceId);
+    return url.href;
+  }
+
+  const basePath = getBasePathFromUrl(url);
+  url.pathname = `${basePath}${WORKSPACE_PATH_SEGMENT}/${encodeURIComponent(safeWorkspaceId)}`;
+  url.search = "";
+  return url.href;
+}
+
+function buildBaseUrl() {
+  const url = new URL(window.location.href);
+  url.hash = "";
+  url.searchParams.delete("workspace");
+
+  if (url.protocol !== "file:") {
+    url.pathname = getBasePathFromUrl(url);
+    url.search = "";
+  }
+
+  return url.href;
+}
+
+function getBasePathFromUrl(url) {
+  const segments = url.pathname.split("/");
+  const workspaceIndex = segments.indexOf(WORKSPACE_PATH_SEGMENT);
+
+  if (workspaceIndex === -1) {
+    const pathname = url.pathname.endsWith("/") ? url.pathname : url.pathname.replace(/\/[^/]*$/, "/");
+    return pathname || "/";
+  }
+
+  const basePath = segments.slice(0, workspaceIndex).join("/") || "/";
+  return basePath.endsWith("/") ? basePath : `${basePath}/`;
+}
+
+function getShareableCurrentUrl() {
+  return activeWorkspaceId ? buildWorkspaceUrl(activeWorkspaceId) : buildBaseUrl();
+}
+
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard?.writeText && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.append(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+
+  if (!copied) {
+    throw new Error("Clipboard copy failed");
+  }
+}
+
+function updateWorkspaceControls() {
+  if (!workspacePanel) {
+    return;
+  }
+
+  workspacePanel.hidden = isStandaloneSite;
+
+  if (workspaceStatus) {
+    workspaceStatus.textContent = activeWorkspaceId
+      ? `현재 개인 주소: ${activeWorkspaceId}`
+      : "현재 기본 주소를 사용 중입니다.";
+  }
+
+  if (workspaceBaseBtn) {
+    workspaceBaseBtn.disabled = !activeWorkspaceId && !new URLSearchParams(window.location.search).has("workspace");
+  }
 }
 
 function loadState() {
